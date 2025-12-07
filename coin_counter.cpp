@@ -125,29 +125,176 @@ vector<Vec3f> detectarCirculos(const Mat& imagemFiltrada,
 }
 
 // ============================================================================
-// FUNÇÃO 5: Classificar Moeda por Tamanho (Raio)
+// CONSTANTES DE CALIBRAÇÃO
 // ============================================================================
-TipoMoeda classificarMoedaPorRaio(float raio, float raioReferencia = 0) {
-    // Se não tiver referência, usa proporções relativas
-    // Assumindo que a maior moeda (1 real) tem ~27mm de diâmetro
-    // e a menor (10 centavos) tem ~20mm
+// Raios reais das moedas brasileiras em mm (diâmetro / 2)
+const float RAIO_1_REAL_MM = 13.5f;       // 27mm diâmetro - bimetálica
+const float RAIO_25_CENTAVOS_MM = 12.5f;  // 25mm diâmetro - prateada
+const float RAIO_50_CENTAVOS_MM = 11.5f;  // 23mm diâmetro - prateada
+const float RAIO_5_CENTAVOS_MM = 11.0f;   // 22mm diâmetro - dourada
+const float RAIO_10_CENTAVOS_MM = 10.0f;  // 20mm diâmetro - dourada
+
+// ============================================================================
+// ENUM PARA COR DA MOEDA
+// ============================================================================
+enum class CorMoeda {
+    DOURADA,    // 5 e 10 centavos (bronze/cobre)
+    PRATEADA,   // 25 e 50 centavos (aço inox)
+    BIMETALICA  // 1 real (centro prata, borda dourada)
+};
+
+// ============================================================================
+// FUNÇÃO 5: Analisar cor da moeda
+// ============================================================================
+CorMoeda analisarCorMoeda(const Mat& imagem, Point2f centro, float raio) {
+    // Cria máscara circular para o centro da moeda
+    Mat mascara = Mat::zeros(imagem.size(), CV_8UC1);
+    circle(mascara, centro, (int)(raio * 0.6), Scalar(255), -1); // 60% do raio para centro
     
-    // Normaliza o raio se houver referência
-    float raioNormalizado = raio;
+    // Converte para HSV para análise de cor
+    Mat hsv;
+    cvtColor(imagem, hsv, COLOR_BGR2HSV);
     
-    // Definindo ranges aproximados (podem ser ajustados conforme calibração)
-    // Estes valores são proporcionais e devem ser calibrados para cada câmera
-    if (raioNormalizado < 35) {
-        return TipoMoeda::DEZ_CENTAVOS;       // Menor moeda
-    } else if (raioNormalizado < 40) {
-        return TipoMoeda::CINCO_CENTAVOS;     // 22mm
-    } else if (raioNormalizado < 45) {
-        return TipoMoeda::CINQUENTA_CENTAVOS; // 23mm
-    } else if (raioNormalizado < 50) {
-        return TipoMoeda::VINTE_CINCO_CENTAVOS; // 25mm
-    } else {
-        return TipoMoeda::UM_REAL;            // 27mm - maior moeda
+    // Calcula cor média do centro
+    Scalar corCentro = mean(hsv, mascara);
+    float hCentro = corCentro[0]; // Hue (0-180 no OpenCV)
+    float sCentro = corCentro[1]; // Saturation (0-255)
+    float vCentro = corCentro[2]; // Value (0-255)
+    
+    // Cria máscara só da borda
+    Mat mascaraBorda = Mat::zeros(imagem.size(), CV_8UC1);
+    circle(mascaraBorda, centro, (int)raio, Scalar(255), -1);
+    circle(mascaraBorda, centro, (int)(raio * 0.7), Scalar(0), -1);
+    
+    Scalar corBorda = mean(hsv, mascaraBorda);
+    float hBorda = corBorda[0];
+    float sBorda = corBorda[1];
+    
+    cout << "    Cor Centro HSV: H=" << fixed << setprecision(1) << hCentro 
+         << " S=" << sCentro << " V=" << vCentro
+         << " | Borda H=" << hBorda << " S=" << sBorda;
+    
+    // Detecta BIMETÁLICA: borda dourada E centro prateado (saturação baixa)
+    // Dourado: H entre 10-35, S > 100
+    // Prateado: S < 80
+    bool bordaDourada = (hBorda >= 10 && hBorda <= 40 && sBorda > 100);
+    bool centroPrateado = (sCentro < 80);
+    
+    if (bordaDourada && centroPrateado) {
+        cout << " -> BIMETALICA" << endl;
+        return CorMoeda::BIMETALICA;
     }
+    
+    // DOURADA (bronze/cobre): Hue entre 8-40, Saturação alta (> 100)
+    if (hCentro >= 8 && hCentro <= 40 && sCentro > 100) {
+        cout << " -> DOURADA" << endl;
+        return CorMoeda::DOURADA;
+    }
+    
+    // PRATEADA: Saturação baixa (cinza)
+    cout << " -> PRATEADA" << endl;
+    return CorMoeda::PRATEADA;
+}
+
+// ============================================================================
+// FUNÇÃO 6: Encontrar maior raio por grupo de cor
+// ============================================================================
+struct ReferenciaPorCor {
+    float maiorRaioDourada = 0;
+    float maiorRaioPrateada = 0;
+    float maiorRaioBimetalica = 0;
+    int countDourada = 0;
+    int countPrateada = 0;
+    int countBimetalica = 0;
+};
+
+ReferenciaPorCor calcularReferenciasPorCor(const Mat& imagem, const vector<Vec3f>& circulos) {
+    ReferenciaPorCor ref;
+    
+    for (const auto& c : circulos) {
+        Point2f centro(c[0], c[1]);
+        float raio = c[2];
+        CorMoeda cor = analisarCorMoeda(imagem, centro, raio);
+        
+        switch (cor) {
+            case CorMoeda::DOURADA:
+                if (raio > ref.maiorRaioDourada) ref.maiorRaioDourada = raio;
+                ref.countDourada++;
+                break;
+            case CorMoeda::PRATEADA:
+                if (raio > ref.maiorRaioPrateada) ref.maiorRaioPrateada = raio;
+                ref.countPrateada++;
+                break;
+            case CorMoeda::BIMETALICA:
+                if (raio > ref.maiorRaioBimetalica) ref.maiorRaioBimetalica = raio;
+                ref.countBimetalica++;
+                break;
+        }
+    }
+    
+    return ref;
+}
+
+// ============================================================================
+// FUNÇÃO 7: Classificar Moeda por Cor e Tamanho
+// ============================================================================
+TipoMoeda classificarMoedaPorCorETamanho(float raioPixels, CorMoeda cor, const ReferenciaPorCor& ref) {
+    
+    // Se é bimetálica, é 1 real (única moeda bimetálica)
+    if (cor == CorMoeda::BIMETALICA) {
+        return TipoMoeda::UM_REAL;
+    }
+    
+    // DOURADAS: 5 centavos (11mm) e 10 centavos (10mm)
+    if (cor == CorMoeda::DOURADA) {
+        if (ref.countDourada == 1) {
+            // Só uma moeda dourada - precisa adivinhar pelo tamanho absoluto
+            // Usa proporção com prateadas se existirem
+            if (ref.maiorRaioPrateada > 0) {
+                // 25 centavos (maior prateada) = 12.5mm
+                float mmPorPixel = RAIO_25_CENTAVOS_MM / ref.maiorRaioPrateada;
+                float raioMM = raioPixels * mmPorPixel;
+                return (raioMM < 10.5f) ? TipoMoeda::DEZ_CENTAVOS : TipoMoeda::CINCO_CENTAVOS;
+            }
+            // Sem referência - assume 5 centavos (mais comum)
+            return TipoMoeda::CINCO_CENTAVOS;
+        }
+        
+        // Múltiplas douradas: maior = 5 centavos (11mm), menor = 10 centavos (10mm)
+        float mmPorPixel = RAIO_5_CENTAVOS_MM / ref.maiorRaioDourada;
+        float raioMM = raioPixels * mmPorPixel;
+        
+        cout << "  Raio: " << fixed << setprecision(1) << raioPixels 
+             << " px -> " << raioMM << " mm (dourada)" << endl;
+        
+        return (raioMM < 10.5f) ? TipoMoeda::DEZ_CENTAVOS : TipoMoeda::CINCO_CENTAVOS;
+    }
+    
+    // PRATEADAS: 25 centavos (12.5mm) e 50 centavos (11.5mm)
+    if (cor == CorMoeda::PRATEADA) {
+        if (ref.countPrateada == 1) {
+            // Só uma moeda prateada - precisa adivinhar
+            if (ref.maiorRaioDourada > 0) {
+                // 5 centavos (maior dourada) = 11mm
+                float mmPorPixel = RAIO_5_CENTAVOS_MM / ref.maiorRaioDourada;
+                float raioMM = raioPixels * mmPorPixel;
+                return (raioMM < 12.0f) ? TipoMoeda::CINQUENTA_CENTAVOS : TipoMoeda::VINTE_CINCO_CENTAVOS;
+            }
+            // Sem referência - assume 25 centavos (mais comum)
+            return TipoMoeda::VINTE_CINCO_CENTAVOS;
+        }
+        
+        // Múltiplas prateadas: maior = 25 centavos (12.5mm), menor = 50 centavos (11.5mm)
+        float mmPorPixel = RAIO_25_CENTAVOS_MM / ref.maiorRaioPrateada;
+        float raioMM = raioPixels * mmPorPixel;
+        
+        cout << "  Raio: " << fixed << setprecision(1) << raioPixels 
+             << " px -> " << raioMM << " mm (prateada)" << endl;
+        
+        return (raioMM < 12.0f) ? TipoMoeda::CINQUENTA_CENTAVOS : TipoMoeda::VINTE_CINCO_CENTAVOS;
+    }
+    
+    return TipoMoeda::UM_REAL; // fallback
 }
 
 // ============================================================================
@@ -191,26 +338,42 @@ string obterNomeDenominacao(TipoMoeda tipo) {
 }
 
 // ============================================================================
-// FUNÇÃO 8: Processar e Classificar Todas as Moedas
+// FUNÇÃO 9: Processar e Classificar Todas as Moedas
 // ============================================================================
-vector<Moeda> processarMoedas(const vector<Vec3f>& circulos) {
+vector<Moeda> processarMoedas(const vector<Vec3f>& circulos, const Mat& imagemOriginal) {
     vector<Moeda> moedas;
     
-    // Encontra o maior e menor raio para calibração relativa
-    float maxRaio = 0, minRaio = FLT_MAX;
-    for (const auto& c : circulos) {
-        if (c[2] > maxRaio) maxRaio = c[2];
-        if (c[2] < minRaio) minRaio = c[2];
+    if (circulos.empty()) {
+        return moedas;
     }
     
+    cout << "\n[ANALISE DE COR] Detectando cores das moedas...\n" << endl;
+    
+    // Primeira passada: analisa cores e calcula referências
+    ReferenciaPorCor ref = calcularReferenciasPorCor(imagemOriginal, circulos);
+    
+    cout << "\n[CALIBRACAO]" << endl;
+    cout << "  Douradas: " << ref.countDourada << " (maior raio: " << ref.maiorRaioDourada << " px)" << endl;
+    cout << "  Prateadas: " << ref.countPrateada << " (maior raio: " << ref.maiorRaioPrateada << " px)" << endl;
+    cout << "  Bimetalicas: " << ref.countBimetalica << " (maior raio: " << ref.maiorRaioBimetalica << " px)" << endl;
+    cout << endl;
+    
+    // Segunda passada: classifica cada moeda
+    cout << "[CLASSIFICACAO]" << endl;
     for (const auto& circulo : circulos) {
         Moeda moeda;
         moeda.centro = Point2f(circulo[0], circulo[1]);
         moeda.raio = circulo[2];
         
-        TipoMoeda tipo = classificarMoedaPorRaio(moeda.raio);
+        // Analisa cor novamente (ou poderia cachear)
+        CorMoeda cor = analisarCorMoeda(imagemOriginal, moeda.centro, moeda.raio);
+        
+        // Classifica por cor e tamanho
+        TipoMoeda tipo = classificarMoedaPorCorETamanho(moeda.raio, cor, ref);
         moeda.valor = obterValorMoeda(tipo);
         moeda.denominacao = obterNomeDenominacao(tipo);
+        
+        cout << "  -> " << moeda.denominacao << endl;
         
         moedas.push_back(moeda);
     }
@@ -322,8 +485,8 @@ ResultadoDeteccao detectarEContarMoedas(const Mat& imagemOriginal,
     // Etapa 3: Detecção de círculos (HoughCircles já trabalha com imagem em cinza)
     vector<Vec3f> circulos = detectarCirculos(imagemFiltrada, minRaio, maxRaio);
     
-    // Etapa 4: Classificação das moedas
-    resultado.moedas = processarMoedas(circulos);
+    // Etapa 4: Classificação das moedas (agora usa cor + tamanho)
+    resultado.moedas = processarMoedas(circulos, imagemOriginal);
     
     // Etapa 5: Cálculos finais
     resultado.valorTotal = calcularValorTotal(resultado.moedas);
@@ -456,7 +619,30 @@ int main(int argc, char** argv) {
              << " possiveis sobreposicoes de moedas." << endl;
     }
     
- 
+    // Exibe as imagens (se houver display disponível)
+    #ifdef SHOW_GUI
+    const char* display = getenv("DISPLAY");
+    if (display != nullptr && strlen(display) > 0) {
+        try {
+            namedWindow("Imagem Original", WINDOW_NORMAL);
+            namedWindow("Imagem Processada", WINDOW_NORMAL);
+            namedWindow("Resultado", WINDOW_NORMAL);
+            
+            imshow("Imagem Original", imagem);
+            imshow("Imagem Processada", resultado.imagemProcessada);
+            imshow("Resultado", resultado.imagemResultado);
+            
+            cout << "\nPressione qualquer tecla para sair..." << endl;
+            waitKey(0);
+            
+            destroyAllWindows();
+        } catch (...) {
+            cout << "[INFO] Display nao disponivel. Salvando imagens..." << endl;
+        }
+    } else {
+        cout << "[INFO] Display nao disponivel. Salvando imagens..." << endl;
+    }
+    #endif
     
     // Salva as imagens de resultado
     imwrite("resultado_processada.jpg", resultado.imagemProcessada);

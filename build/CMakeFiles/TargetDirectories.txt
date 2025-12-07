@@ -1,0 +1,7 @@
+/home/vinicius/ContadorMoedas/build/CMakeFiles/coin_counter.dir
+/home/vinicius/ContadorMoedas/build/CMakeFiles/edit_cache.dir
+/home/vinicius/ContadorMoedas/build/CMakeFiles/rebuild_cache.dir
+/home/vinicius/ContadorMoedas/build/CMakeFiles/list_install_components.dir
+/home/vinicius/ContadorMoedas/build/CMakeFiles/install.dir
+/home/vinicius/ContadorMoedas/build/CMakeFiles/install/local.dir
+/home/vinicius/ContadorMoedas/build/CMakeFiles/install/strip.dir
