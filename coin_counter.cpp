@@ -174,26 +174,39 @@ CorMoeda analisarCorMoeda(const Mat& imagem, Point2f centro, float raio) {
          << " S=" << sCentro << " V=" << vCentro
          << " | Borda H=" << hBorda << " S=" << sBorda;
     
-    // Detecta BIMETÁLICA: borda dourada E centro prateado (saturação baixa)
-    // Dourado: H entre 10-35, S > 100
-    // Prateado: S < 80
+    // Detecta BIMETÁLICA: borda dourada E centro diferente (menos saturado ou Hue diferente)
     bool bordaDourada = (hBorda >= 10 && hBorda <= 40 && sBorda > 100);
-    bool centroPrateado = (sCentro < 80);
+    bool centroDiferente = (sCentro < sBorda - 50) || (hCentro > 35);  // Centro menos saturado ou Hue mais alto
     
-    if (bordaDourada && centroPrateado) {
+    if (bordaDourada && centroDiferente) {
         cout << " -> BIMETALICA" << endl;
         return CorMoeda::BIMETALICA;
     }
     
-    // DOURADA (bronze/cobre): Hue entre 8-40, Saturação alta (> 100)
-    if (hCentro >= 8 && hCentro <= 40 && sCentro > 100) {
+    // DOURADA (bronze/cobre): Hue entre 8-45, Saturação alta (> 100)
+    // Moedas douradas tem Hue na faixa laranja/amarelo (8-45)
+    if (hCentro >= 8 && hCentro <= 45 && sCentro > 100) {
         cout << " -> DOURADA" << endl;
         return CorMoeda::DOURADA;
     }
     
-    // PRATEADA: Saturação baixa (cinza)
-    cout << " -> PRATEADA" << endl;
-    return CorMoeda::PRATEADA;
+    // PRATEADA: 
+    // 1. Saturação baixa (cinza claro) - moeda limpa
+    // 2. Hue fora do range dourado (>45 ou <8) - moeda suja/escura
+    if (sCentro < 80) {
+        cout << " -> PRATEADA" << endl;
+        return CorMoeda::PRATEADA;
+    }
+    
+    // Moeda escura com Hue fora do range dourado = prateada suja
+    if (hCentro > 45 || hCentro < 8) {
+        cout << " -> PRATEADA (escura/suja)" << endl;
+        return CorMoeda::PRATEADA;
+    }
+    
+    // Fallback: se tiver saturação alta e Hue no range, é dourada
+    cout << " -> DOURADA (fallback)" << endl;
+    return CorMoeda::DOURADA;
 }
 
 // ============================================================================
@@ -249,10 +262,11 @@ TipoMoeda classificarMoedaPorCorETamanho(float raioPixels, CorMoeda cor, const R
     if (cor == CorMoeda::DOURADA) {
         if (ref.countDourada == 1) {
             // Só uma moeda dourada - precisa adivinhar pelo tamanho absoluto
-            // Usa proporção com prateadas se existirem
             if (ref.maiorRaioPrateada > 0) {
-                // 25 centavos (maior prateada) = 12.5mm
-                float mmPorPixel = RAIO_25_CENTAVOS_MM / ref.maiorRaioPrateada;
+                // Usa prateada como referência
+                // 50 centavos = 11.5mm, 25 centavos = 12.5mm
+                // Assume menor prateada = 50 centavos
+                float mmPorPixel = RAIO_50_CENTAVOS_MM / ref.maiorRaioPrateada;
                 float raioMM = raioPixels * mmPorPixel;
                 return (raioMM < 10.5f) ? TipoMoeda::DEZ_CENTAVOS : TipoMoeda::CINCO_CENTAVOS;
             }
@@ -267,7 +281,9 @@ TipoMoeda classificarMoedaPorCorETamanho(float raioPixels, CorMoeda cor, const R
         cout << "  Raio: " << fixed << setprecision(1) << raioPixels 
              << " px -> " << raioMM << " mm (dourada)" << endl;
         
-        return (raioMM < 10.5f) ? TipoMoeda::DEZ_CENTAVOS : TipoMoeda::CINCO_CENTAVOS;
+        // Threshold: média entre 10mm e 11mm = 10.5mm
+        // Mas na prática a diferença é pequena, então uso 10.3mm para ser mais conservador
+        return (raioMM < 10.3f) ? TipoMoeda::DEZ_CENTAVOS : TipoMoeda::CINCO_CENTAVOS;
     }
     
     // PRATEADAS: 25 centavos (12.5mm) e 50 centavos (11.5mm)
