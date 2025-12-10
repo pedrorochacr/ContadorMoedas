@@ -137,78 +137,60 @@ public:
         }
         
         try {
-            // Pré-processa a imagem conforme YOLOv8 espera
-            Mat resized;
-            resize(imagemMoeda, resized, Size(inputSize, inputSize));
+            // Pré-processa EXATAMENTE como YOLOv8 faz:
+            // 1. Resize para 224x224
+            // 2. BGR -> RGB
+            // 3. Normaliza [0, 255] -> [0, 1]
+            // 4. HWC -> CHW
             
-            // YOLOv8 espera RGB normalizado [0, 1]
-            Mat rgb;
-            if (resized.channels() == 3) {
-                cvtColor(resized, rgb, COLOR_BGR2RGB);
-            } else if (resized.channels() == 1) {
-                cvtColor(resized, rgb, COLOR_GRAY2RGB);
-            } else {
-                rgb = resized;
-            }
-            
-            // Cria blob - YOLOv8 usa normalização 1/255
             Mat blob;
-            blobFromImage(rgb, blob, 1.0/255.0, Size(inputSize, inputSize), 
-                          Scalar(0, 0, 0), true, false);
+            // blobFromImage com swapRB=true converte BGR->RGB
+            // scalefactor=1/255 normaliza para [0,1]
+            blobFromImage(imagemMoeda, blob, 
+                          1.0/255.0,           // scale factor
+                          Size(inputSize, inputSize),  // size 224x224
+                          Scalar(0, 0, 0),     // mean subtraction (none)
+                          true,                // swapRB: BGR -> RGB
+                          false);              // crop
+            
+            if (debug) {
+                cout << "      [DEBUG] Blob shape: [" << blob.size[0] << ", " << blob.size[1] 
+                     << ", " << blob.size[2] << ", " << blob.size[3] << "]" << endl;
+                     
+                // Verifica alguns valores do blob
+                float* data = (float*)blob.data;
+                cout << "      [DEBUG] Primeiros pixels (R,G,B): " 
+                     << data[0] << ", " << data[224*224] << ", " << data[2*224*224] << endl;
+            }
             
             // Executa inferência
             net.setInput(blob);
             Mat output = net.forward();
             
-            int numClasses = (int)classNames.size();
-            int outputCols = output.total();
-            
-            if (debug) {
-                cout << "      [DEBUG] Output total elements: " << outputCols << endl;
-                cout << "      [DEBUG] Nossas classes: " << numClasses << endl;
-            }
-            
-            // Pega apenas as primeiras N classes que nos interessam
             Mat probs = output.reshape(1, 1);
-            
-            // IMPORTANTE: Considera apenas as classes que temos (5, 10, 25, 50, 100)
-            // O modelo pode ter mais classes do que precisamos
-            Mat nossasProbs;
-            if (probs.cols > numClasses) {
-                nossasProbs = probs.colRange(0, numClasses).clone();
-            } else {
-                nossasProbs = probs.clone();
-            }
+            int numClasses = probs.cols;
             
             if (debug) {
-                cout << "      [DEBUG] Probabilidades das nossas classes: ";
-                for (int i = 0; i < nossasProbs.cols; i++) {
-                    cout << classNames[i] << "=" << fixed << setprecision(3) << nossasProbs.at<float>(0, i) << " ";
-                }
-                cout << endl;
-            }
-            
-            // Aplica softmax nas nossas classes para normalizar
-            Mat expProbs;
-            exp(nossasProbs, expProbs);
-            float sumExp = (float)sum(expProbs)[0];
-            Mat softmaxProbs = expProbs / sumExp;
-            
-            if (debug) {
-                cout << "      [DEBUG] Após softmax normalizado: ";
-                for (int i = 0; i < softmaxProbs.cols; i++) {
-                    cout << classNames[i] << "=" << fixed << setprecision(1) << (softmaxProbs.at<float>(0, i) * 100) << "% ";
+                cout << "      [DEBUG] Output classes: " << numClasses << endl;
+                cout << "      [DEBUG] Raw output: ";
+                for (int i = 0; i < numClasses; i++) {
+                    cout << classNames[i] << "=" << fixed << setprecision(4) << probs.at<float>(0, i) << " ";
                 }
                 cout << endl;
             }
             
             // Encontra classe com maior probabilidade
-            Point classIdPoint;
-            double maxProb;
-            minMaxLoc(softmaxProbs, nullptr, &maxProb, nullptr, &classIdPoint);
+            Point maxLoc;
+            double maxVal;
+            minMaxLoc(probs, nullptr, &maxVal, nullptr, &maxLoc);
             
-            int classId = classIdPoint.x;
-            float confidence = (float)maxProb;
+            int classId = maxLoc.x;
+            float confidence = (float)maxVal;
+            
+            if (debug) {
+                cout << "      [DEBUG] Classe: " << classId << " (" << classNames[classId] 
+                     << ") conf: " << (confidence * 100) << "%" << endl;
+            }
             
             return {classId, confidence};
             
@@ -290,29 +272,41 @@ vector<Vec3f> detectarCirculos(const Mat& imagem, int minRaio = 20, int maxRaio 
 }
 
 /**
- * Extrai a região de uma moeda da imagem
+ * Extrai a região de uma moeda da imagem, aplicando fundo cinza ao redor
+ * para simular as imagens de treino
  */
-Mat extrairMoeda(const Mat& imagem, Point2f centro, float raio) {
-    // Define região de interesse com margem
-    int margin = 5;
-    int x = max(0, (int)(centro.x - raio - margin));
-    int y = max(0, (int)(centro.y - raio - margin));
-    int w = min((int)(2 * raio + 2 * margin), imagem.cols - x);
-    int h = min((int)(2 * raio + 2 * margin), imagem.rows - y);
+Mat extrairMoeda(const Mat& imagem, Point2f centro, float raio, int idx = 0) {
+    // Cria uma cópia da imagem com fundo cinza
+    Mat resultado = Mat(imagem.size(), imagem.type(), Scalar(180, 180, 180));
     
-    Rect roi(x, y, w, h);
-    Mat moedaRegiao = imagem(roi).clone();
+    // Cria máscara circular para a moeda (com margem)
+    Mat mask = Mat::zeros(imagem.size(), CV_8UC1);
+    circle(mask, centro, (int)(raio * 1.1), Scalar(255), -1);
     
-    // Cria máscara circular
-    Mat mask = Mat::zeros(moedaRegiao.size(), CV_8UC1);
-    Point2f centroLocal(moedaRegiao.cols / 2.0f, moedaRegiao.rows / 2.0f);
-    circle(mask, centroLocal, (int)raio, Scalar(255), -1);
+    // Copia apenas a região da moeda para o fundo cinza
+    imagem.copyTo(resultado, mask);
     
-    // Aplica máscara (fundo preto fora do círculo)
-    Mat resultado;
-    moedaRegiao.copyTo(resultado, mask);
+    // Agora recorta uma região quadrada centrada na moeda
+    // com proporções similares às imagens de treino (moeda ocupa ~40% da imagem)
+    float fator = 4.0f;
+    int tamanho = (int)(raio * fator);
     
-    return resultado;
+    int x = max(0, (int)(centro.x - tamanho / 2));
+    int y = max(0, (int)(centro.y - tamanho / 2));
+    int w = min(tamanho, resultado.cols - x);
+    int h = min(tamanho, resultado.rows - y);
+    int lado = min(w, h);
+    
+    Rect roi(x, y, lado, lado);
+    Mat recorte = resultado(roi).clone();
+    
+    // Salva para debug
+    if (idx == 0) {
+        imwrite("debug_recorte_cpp.jpg", recorte);
+        cout << "      [DEBUG] Recorte salvo em debug_recorte_cpp.jpg" << endl;
+    }
+    
+    return recorte;
 }
 
 // ============================================================================
@@ -343,13 +337,14 @@ ResultadoDeteccao detectarEClassificarMoedas(
     // Classifica cada moeda
     cout << "\n[2/2] Classificando moedas (YOLOv8)..." << endl;
     
+    int idx = 0;
     for (const auto& c : circulos) {
         Moeda moeda;
         moeda.centro = Point2f(c[0], c[1]);
         moeda.raio = c[2];
         
         // Extrai região da moeda
-        Mat moedaImg = extrairMoeda(imagem, moeda.centro, moeda.raio);
+        Mat moedaImg = extrairMoeda(imagem, moeda.centro, moeda.raio, idx);
         
         // Classifica com ML (debug na primeira moeda)
         bool debug = (resultado.moedas.empty()); // Debug só na primeira
@@ -366,6 +361,7 @@ ResultadoDeteccao detectarEClassificarMoedas(
         
         resultado.moedas.push_back(moeda);
         resultado.valorTotal += moeda.valor;
+        idx++;
     }
     
     resultado.quantidadeTotal = resultado.moedas.size();

@@ -1,0 +1,6 @@
+# Dependências para treinamento do modelo YOLOv8
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+onnx>=1.14.0
+onnxruntime>=1.15.0
